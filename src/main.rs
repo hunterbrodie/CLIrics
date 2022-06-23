@@ -40,11 +40,13 @@ fn listen(player: Player) {
                     let artist = e.artists().unwrap()[0].to_owned();
                     let title = e.title().unwrap().to_owned();
 
-                    let lyrics = match get_lyrics(artist, title) {
-                        Some(e) => e,
-                        None => continue
+                    match get_lyrics(artist, title) {
+                        Some(e) => print_lyrics(&e),
+                        None => {
+                            print_lyrics("Can't Find Lyrics");
+                            continue;
+                        }
                     };
-                    print_lyrics(&lyrics);
                 },
                 _ => continue
             },
