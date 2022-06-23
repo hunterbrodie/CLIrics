@@ -10,27 +10,38 @@ use scraper::ElementRef;
 
 use std::io::{self, Write};
 
-// Pauses currently playing media and prints metadata information about that
-// media.
-// If no player is running, exits with an error.
 fn main() {
+    clear_screen();
+    listen();
+}
+
+fn print_lyrics(artist: &str, title: &str, lyrics: &str) {
+    clear_screen();
+
+    let title = format!("{} - {}", artist, title);
+    let mut line = String::new();
+
+    for _ in 0..title.len() {
+        line += "─";
+    }
+
+    println!("┌{}┐", line);
+    println!("│{}│", title);
+    println!("└{}┘", line);
+    println!("{}\n", lyrics);
+}
+
+fn clear_screen() {
     print!("\x1B[2J\x1B[1;1H");
     io::stdout().flush().unwrap();
+}
 
+fn listen() {
     let player = match get_cmus() {
         Some(p) => p,
         None => panic!("Could not find CMUS player")
     };
 
-    listen(player);
-
-    /*match get_lyrics("JPEGMAFIA".to_owned(), "I used to be into dope".to_owned()) {
-        Some(e) => print_lyrics(&e),
-        None => print_lyrics("Can't find lyrics")
-    };*/
-}
-
-fn listen(player: Player) {
     let events = player.events().expect("Could not start event stream");
 
     for event in events {
@@ -40,10 +51,10 @@ fn listen(player: Player) {
                     let artist = e.artists().unwrap()[0].to_owned();
                     let title = e.title().unwrap().to_owned();
 
-                    match get_lyrics(artist, title) {
-                        Some(e) => print_lyrics(&e),
+                    match get_lyrics(&artist, &title) {
+                        Some(e) => print_lyrics(&artist, &title, &e),
                         None => {
-                            print_lyrics("Can't Find Lyrics");
+                            print_lyrics(&artist, &title, "Can't Find Lyrics");
                             continue;
                         }
                     };
@@ -58,15 +69,9 @@ fn listen(player: Player) {
     }
 }
 
-fn print_lyrics(msg: &str) {
-    print!("\x1B[2J\x1B[1;1H");
-    io::stdout().flush().unwrap();
-    println!("{}", msg);
-}
-
-fn get_lyrics(artist: String, song: String) -> Option<String> {
+fn get_lyrics(artist: &str, song: &str) -> Option<String> {
     let client = reqwest::blocking::Client::new();
-    let url = format!("https://www.azlyrics.com/lyrics/{}/{}.html", artist.to_lowercase().replace(" ", ""), song.to_lowercase().replace(" ", ""));
+    let url = format!("https://www.azlyrics.com/lyrics/{}/{}.html", format_az_metadata(artist), format_az_metadata(song));
     let resp = client.get(&url)
         .send()
         .unwrap()
@@ -145,4 +150,8 @@ fn get_cmus() -> Option<Player<'static>> {
     }
 
     return None;
+}
+
+fn format_az_metadata(dat: &str) -> String {
+    dat.to_lowercase().replace(" ", "").replace("\\W|\\s", "")
 }
