@@ -3,62 +3,103 @@ extern crate mpris;
 use mpris::PlayerFinder;
 use mpris::Player;
 use mpris::Event;
+use mpris::Metadata;
 
 use scraper::Html;
 use scraper::Selector;
 use scraper::ElementRef;
 
-use std::io::{self, Write};
+use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}
+};
+use std::{
+    error::Error,
+    io
+};
+use tui::{
+    backend::{Backend, CrosstermBackend},
+    layout::{Alignment, Constraint, Direction, Layout},
+    style::{Modifier, Style},
+    text::{Span, Spans},
+    widgets::{Block, Borders, Paragraph, Wrap},
+    Frame, Terminal,
+};
 
-fn main() {
-    clear_screen();
-    listen();
+
+fn main() -> Result<(), Box<dyn Error>> {
+    // setup terminal
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture,)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    listen(&mut terminal)?;
+
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+
+    Ok(())
 }
 
-fn print_lyrics(artist: &str, title: &str, lyrics: &str) {
-    clear_screen();
+fn draw_frame<B: Backend>(f: &mut Frame<B>, artist: &str, song: &str, lyrics: Vec<String>) {
+    let size = f.size();
+    
+    let block = Block::default().style(Style::default());
+    f.render_widget(block, size);
 
-    let title = format!("{} - {}", artist, title);
-    let mut line = String::new();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(0)
+        .constraints(
+            [
+                Constraint::Percentage(100),
+            ]
+            .as_ref(),
+        )
+        .split(size);
 
-    for _ in 0..title.len() {
-        line += "─";
-    }
+    let text: Vec<Spans> = lyrics.into_iter().map(|l| Spans::from(l)).collect();
 
-    println!("┌{}┐", line);
-    println!("│{}│", title);
-    println!("└{}┘", line);
-    println!("{}\n", lyrics);
+    let create_block = |title| {
+        Block::default()
+            .borders(Borders::ALL)
+            .style(Style::default())
+            .title(Span::styled(
+                title,
+                Style::default().add_modifier(Modifier::BOLD),
+            ))
+    };
+
+    let paragraph = Paragraph::new(text)
+        .style(Style::default())
+        .block(create_block(format!("{} - {}", artist, song)))
+        .alignment(Alignment::Left)
+        .wrap(Wrap { trim: true });
+    f.render_widget(paragraph, chunks[0]);
 }
 
-fn clear_screen() {
-    print!("\x1B[2J\x1B[1;1H");
-    io::stdout().flush().unwrap();
-}
-
-fn listen() {
+fn listen<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), Box<dyn Error>> {
     let player = match get_cmus() {
         Some(p) => p,
         None => panic!("Could not find CMUS player")
     };
+    
+    display_metadata(terminal, player.get_metadata().expect("Could not get initial metadata"))?;
 
     let events = player.events().expect("Could not start event stream");
 
     for event in events {
         match event {
             Ok(event) => match event {
-                Event::TrackChanged(e) => {
-                    let artist = e.artists().unwrap()[0].to_owned();
-                    let title = e.title().unwrap().to_owned();
-
-                    match get_lyrics(&artist, &title) {
-                        Some(e) => print_lyrics(&artist, &title, &e),
-                        None => {
-                            print_lyrics(&artist, &title, "Can't Find Lyrics");
-                            continue;
-                        }
-                    };
-                },
+                Event::TrackChanged(e) =>  display_metadata(terminal, e)?,
                 _ => continue
             },
             Err(err) => {
@@ -67,9 +108,23 @@ fn listen() {
             }
         }
     }
+
+    Ok(())
 }
 
-fn get_lyrics(artist: &str, song: &str) -> Option<String> {
+fn display_metadata<B: Backend>(terminal: &mut Terminal<B>, metadata: Metadata) -> Result<(), Box<dyn Error>> {
+    let artist = metadata.artists().unwrap()[0].clone();
+    let title = metadata.title().unwrap();
+
+    match get_lyrics(&artist, &title) {
+        Some(e) => terminal.draw(|f| draw_frame(f, &artist, &title, e))?,
+        None => terminal.draw(|f| draw_frame(f, &artist, &title, vec!["Can't Find Lyrics".to_owned()]))?
+    };
+
+    Ok(())
+}
+
+fn get_lyrics(artist: &str, song: &str) -> Option<Vec<String>> {
     let client = reqwest::blocking::Client::new();
     let url = format!("https://www.azlyrics.com/lyrics/{}/{}.html", format_az_metadata(artist), format_az_metadata(song));
     let resp = client.get(&url)
@@ -102,18 +157,17 @@ fn get_lyrics(artist: &str, song: &str) -> Option<String> {
         match element.value().attr("class") {
             Some(_) => continue,
             None => {
-                let mut lyrics = String::new();
+                let mut lyrics: Vec<String> = Vec::new();
                 
                 for line in element.text().collect::<Vec<_>>() {
                     let line = line.to_owned().to_owned();
 
                     if !line.is_empty() && !line.contains("freestar.config") {
-                        line.trim().to_owned().push_str("\n");
-                        lyrics.push_str(&line);
+                        lyrics.push(line.trim().to_owned());
                     }
                 }
 
-                return Some(lyrics.trim().to_owned());
+                return Some(lyrics);
             }
         }
     }
@@ -153,5 +207,5 @@ fn get_cmus() -> Option<Player<'static>> {
 }
 
 fn format_az_metadata(dat: &str) -> String {
-    dat.to_lowercase().replace(" ", "").replace("\\W|\\s", "")
+    dat.to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect()
 }
