@@ -163,7 +163,7 @@ fn get_lyrics(artist: &str, song: &str) -> Option<Vec<String>> {
                 for i in 2..lines.len() {
                     let line = lines[i].to_owned();
 
-                    if !(lines[i].eq("\n") && i + 1 < lines.len() && lines[i + 1].eq("\n"))
+                    if !(lines[i].trim().is_empty() && i + 1 < lines.len() && lines[i + 1].trim().is_empty())
                     {
                         if !line.contains("freestar.config") {
                             lyrics.push(line.trim().to_owned());
@@ -211,5 +211,25 @@ fn get_cmus() -> Option<Player<'static>> {
 }
 
 fn format_az_metadata(dat: &str) -> String {
-    dat.to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+    let mut result = String::new();
+    let mut open_delim: bool = false;
+
+    for word in dat.split_whitespace() {
+        if open_delim == true {
+            if word.ends_with(")") {
+                open_delim = false;
+            }
+        }
+        else {
+            if word.starts_with("(feat") || word.starts_with("(ft") {
+                open_delim = true;
+            }
+            else {
+                result.push_str(word);
+                result.push_str(" ");
+            }
+        }
+    }
+
+    result.trim().to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect()
 }
