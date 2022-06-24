@@ -158,12 +158,16 @@ fn get_lyrics(artist: &str, song: &str) -> Option<Vec<String>> {
             Some(_) => continue,
             None => {
                 let mut lyrics: Vec<String> = Vec::new();
+                let lines = element.text().collect::<Vec<_>>();
                 
-                for line in element.text().collect::<Vec<_>>() {
-                    let line = line.to_owned().to_owned();
+                for i in 2..lines.len() {
+                    let line = lines[i].to_owned();
 
-                    if !line.is_empty() && !line.contains("freestar.config") {
-                        lyrics.push(line.trim().to_owned());
+                    if !(lines[i].eq("\n") && i + 1 < lines.len() && lines[i + 1].eq("\n"))
+                    {
+                        if !line.contains("freestar.config") {
+                            lyrics.push(line.trim().to_owned());
+                        }
                     }
                 }
 
