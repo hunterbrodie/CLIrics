@@ -1,106 +1,192 @@
 extern crate mpris;
 
-use mpris::PlayerFinder;
-use mpris::Player;
-use mpris::Event;
-use mpris::Metadata;
+use mpris::{Metadata, Player, PlayerFinder};
 
-use scraper::Html;
-use scraper::Selector;
-use scraper::ElementRef;
+use lyricrustacean::get_lyrics;
 
 use crossterm::{
+    cursor,
     event::{DisableMouseCapture, EnableMouseCapture},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}
-};
-use std::{
-    error::Error,
-    io
-};
-use tui::{
-    backend::{Backend, CrosstermBackend},
-    layout::{Alignment, Constraint, Direction, Layout},
-    style::{Modifier, Style},
-    text::{Span, Spans},
-    widgets::{Block, Borders, Paragraph, Wrap},
-    Frame, Terminal,
+    execute, queue,
+    style::{self, SetAttribute, Attribute},
+    terminal::{
+        self, disable_raw_mode, enable_raw_mode, ClearType, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
+    event::{poll, read}
 };
 
+use std::{
+    error::Error,
+    io::{stdout, Write},
+    thread,
+    sync::mpsc::{self, Sender, Receiver},
+    time::Duration
+};
+
+struct Data {
+    artist: Option<String>,
+    title: Option<String>,
+    lyrics: Option<Vec<String>>,
+    scroll: Option<Scroll>,
+    exit: bool
+}
+
+enum Scroll {
+    Up,
+    Down,
+    Reset
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
     // setup terminal
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture,)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    listen(&mut terminal)?;
-
-    disable_raw_mode()?;
     execute!(
-        terminal.backend_mut(),
+        stdout(),
+        cursor::Hide,
+        terminal::Clear(ClearType::All),
+        EnterAlternateScreen,
+        EnableMouseCapture
+    )?;
+
+    let (mpris_tx, rx): (Sender<Data>, Receiver<Data>) = mpsc::channel();
+    let input_tx = mpris_tx.clone();
+
+    thread::spawn(move || {
+        mpris_listen(mpris_tx);
+    });
+
+    thread::spawn(move || {
+        input_listen(input_tx);
+    });
+
+    let mut artist = String::new();
+    let mut title = String::new();
+    let mut lyrics: Vec<String> = Vec::new();
+    let mut start: usize = 0;
+
+    for received in rx {
+        if received.exit {
+            break;
+        }
+
+        match received.artist {
+            Some(e) => artist = e,
+            None => ()
+        }
+        match received.title {
+            Some(e) => title = e,
+            None => ()
+        }
+        match received.lyrics {
+            Some(e) => lyrics = e,
+            None => ()
+        }
+        match received.scroll {
+            Some(e) => match e {
+                Scroll::Up => {
+                    /*if !(start >= lyrics.len()) {
+                        start += 1;
+                    }*/
+                    if (lyrics.len() - start) as u16 > terminal::size().expect("Coudln't get terminal size").1 - 2 {
+                        start += 1;
+                    }
+                },
+                Scroll::Down => {
+                    if start != 0 {
+                        start -= 1;
+                    }
+                },
+                Scroll::Reset => start = 0,
+            },
+            None => ()
+        }
+        
+        print_lyrics(&artist, &title, &lyrics, &start)?;
+
+        //let mut stdout = stdout();
+    }
+
+    execute!(
+        stdout(),
+        cursor::Show,
         LeaveAlternateScreen,
         DisableMouseCapture
     )?;
-    terminal.show_cursor()?;
+    disable_raw_mode()?;
 
     Ok(())
 }
 
-fn draw_frame<B: Backend>(f: &mut Frame<B>, artist: &str, song: &str, lyrics: Vec<String>) {
-    let size = f.size();
-    
-    let block = Block::default().style(Style::default());
-    f.render_widget(block, size);
+fn input_listen(tx: Sender<Data>) {
+    loop {
+        if poll(Duration::from_millis(100)).expect("Couldn't read input") {
+            let mut scroll: Option<Scroll> = None;
+            let mut exit = false;
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .margin(0)
-        .constraints(
-            [
-                Constraint::Percentage(100),
-            ]
-            .as_ref(),
-        )
-        .split(size);
+            let event = read().expect("Failed to read input");
+            match event {
+                crossterm::event::Event::Key(e) => {
+                    if e.modifiers.bits() == 0b0000_0010 && match e.code {
+                        crossterm::event::KeyCode::Char(c) => c.eq(&'c'),
+                        _ => false
+                    } {
+                        exit = true;
+                    }
+                },
+                crossterm::event::Event::Mouse(e) => {
+                    match e.kind {
+                        crossterm::event::MouseEventKind::ScrollDown => scroll = Some(Scroll::Up),
+                        crossterm::event::MouseEventKind::ScrollUp => scroll = Some(Scroll::Down),
+                        _ => ()
+                    }
+                },
+                _ => ()
+            }
 
-    let text: Vec<Spans> = lyrics.into_iter().map(|l| Spans::from(l)).collect();
-
-    let create_block = |title| {
-        Block::default()
-            .borders(Borders::ALL)
-            .style(Style::default())
-            .title(Span::styled(
-                title,
-                Style::default().add_modifier(Modifier::BOLD),
-            ))
-    };
-
-    let paragraph = Paragraph::new(text)
-        .style(Style::default())
-        .block(create_block(format!("{} - {}", artist, song)))
-        .alignment(Alignment::Left)
-        .wrap(Wrap { trim: true });
-    f.render_widget(paragraph, chunks[0]);
+            tx.send(Data{
+                artist: None,
+                title: None,
+                lyrics: None,
+                scroll: scroll,
+                exit: exit
+            }).expect("Failed to send data");
+        }
+    }
 }
 
-fn listen<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), Box<dyn Error>> {
+fn mpris_listen(tx: Sender<Data>) {
     let player = match get_cmus() {
         Some(p) => p,
-        None => panic!("Could not find CMUS player")
+        None => panic!("Could not find CMUS player"),
     };
-    
-    display_metadata(terminal, player.get_metadata().expect("Could not get initial metadata"))?;
+    let tuple = get_metadata(player.get_metadata().expect("failed to get metadata"));
+
+    tx.send(Data {
+        artist: Some(tuple.0),
+        title: Some(tuple.1),
+        lyrics: Some(tuple.2),
+        scroll: Some(Scroll::Reset),
+        exit: false
+    }).expect("Failed to send data");
 
     let events = player.events().expect("Could not start event stream");
 
     for event in events {
         match event {
             Ok(event) => match event {
-                Event::TrackChanged(e) =>  display_metadata(terminal, e)?,
-                _ => continue
+                mpris::Event::TrackChanged(e) => {
+                    let tuple = get_metadata(e);
+
+                    tx.send(Data {
+                        artist: Some(tuple.0),
+                        title: Some(tuple.1),
+                        lyrics: Some(tuple.2),
+                        scroll: Some(Scroll::Reset),
+                        exit: false
+                    }).expect("Failed to send data");
+                }
+                _ => continue,
             },
             Err(err) => {
                 println!("D-Bus error: {}. Aborting.", err);
@@ -108,99 +194,33 @@ fn listen<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), Box<dyn Error>> 
             }
         }
     }
-
-    Ok(())
 }
 
-fn display_metadata<B: Backend>(terminal: &mut Terminal<B>, metadata: Metadata) -> Result<(), Box<dyn Error>> {
-    let artist = metadata.artists().unwrap()[0].clone();
-    let title = metadata.title().unwrap();
+fn get_metadata(metadata: Metadata) -> (String, String, Vec<String>) {
+    let mut tuple: (String, String, Vec<String>) = (String::new(), String::new(), Vec::new());
 
-    match get_lyrics(&artist, &title) {
-        Some(e) => terminal.draw(|f| draw_frame(f, &artist, &title, e))?,
-        None => terminal.draw(|f| draw_frame(f, &artist, &title, vec!["Can't Find Lyrics".to_owned()]))?
+    match metadata.artists() {
+        Some(e) => tuple.0 = e[0].clone(),
+        None => (),
     };
 
-    Ok(())
-}
-
-fn get_lyrics(artist: &str, song: &str) -> Option<Vec<String>> {
-    let client = reqwest::blocking::Client::new();
-    let url = format!("https://www.azlyrics.com/lyrics/{}/{}.html", format_az_metadata(artist), format_az_metadata(song));
-    let resp = client.get(&url)
-        .send()
-        .unwrap()
-        .text()
-        .unwrap();
-    
-    let document = Html::parse_document(resp.as_str());
-    let body_selector = Selector::parse("body").unwrap();
-
-    let body = document.select(&body_selector).next().unwrap();
-
-    let div = match find_div_child(&body, "container main-page") {
-        Some(e) => e,
-        None => return None
-    };
-    let div = match find_div_child(&div, "row") {
-        Some(e) => e,
-        None => return None
-    };
-    let div = match find_div_child(&div, "col-xs-12 col-lg-8 text-center") {
-        Some(e) => e,
-        None => return None
-    };
-
-    let div_selector = Selector::parse("div").unwrap();
-
-    for element in div.select(&div_selector) {
-        match element.value().attr("class") {
-            Some(_) => continue,
-            None => {
-                let mut lyrics: Vec<String> = Vec::new();
-                let lines = element.text().collect::<Vec<_>>();
-                
-                for i in 2..lines.len() {
-                    let line = lines[i].to_owned();
-
-                    if !(lines[i].trim().is_empty() && i + 1 < lines.len() && lines[i + 1].trim().is_empty())
-                    {
-                        if !line.contains("freestar.config") {
-                            lyrics.push(line.trim().to_owned());
-                        }
-                    }
-                }
-
-                return Some(lyrics);
-            }
-        }
+    match metadata.title() {
+        Some(e) => tuple.1 = e.clone().to_owned(),
+        None => (),
     }
 
-    return None;
-}
+    match get_lyrics(&tuple.0, &tuple.1) {
+        Some(e) => tuple.2 = e,
+        None => tuple.2 = vec!["Can't Find Lyrics".to_owned()],
+    };
 
-fn find_div_child<'a>(fragment: &'a ElementRef, class: &str) -> Option<ElementRef<'a>> {
-    let div_selector = Selector::parse("div").unwrap();
-
-    for element in fragment.select(&div_selector) {
-        match element.value().attr("class") {
-            Some(a) => {
-                if a.eq(class) {
-                    return Some(element);
-                }
-            },
-            None => continue
-        }
-    }
-
-    return None;
+    tuple
 }
 
 fn get_cmus() -> Option<Player<'static>> {
     let player_finder = PlayerFinder::new().expect("Could not connect to D-Bus");
 
     let all_players = player_finder.find_all().expect("Can't find players");
-    
     for player in all_players {
         if format!("{}", player.bus_name()).ends_with("cmus") {
             return Some(player);
@@ -210,26 +230,35 @@ fn get_cmus() -> Option<Player<'static>> {
     return None;
 }
 
-fn format_az_metadata(dat: &str) -> String {
-    let mut result = String::new();
-    let mut open_delim: bool = false;
+fn print_lyrics(artist: &str, title: &str, lyrics: &Vec<String>, start: &usize) -> Result<(), Box<dyn Error>> {
+    let height = terminal::size()?.1 as usize;
 
-    for word in dat.split_whitespace() {
-        if open_delim == true {
-            if word.ends_with(")") {
-                open_delim = false;
-            }
+    let mut stdout = stdout();
+    queue!(
+        stdout,
+        terminal::Clear(ClearType::All),
+        cursor::MoveTo(0, 0),
+        style::Print(" "),
+        style::SetAttribute(Attribute::Bold),
+        style::SetAttribute(Attribute::Underlined),
+        style::Print(format!("{} - {}", &artist, &title)),
+        SetAttribute(Attribute::Reset),
+        cursor::MoveTo(0, 1)
+    )?;
+
+    for i in 1..height {
+        let index = start + i - 1;
+        if i > height - 2 || index >= lyrics.len() {
+            break;
         }
-        else {
-            if word.starts_with("(feat") || word.starts_with("(ft") {
-                open_delim = true;
-            }
-            else {
-                result.push_str(word);
-                result.push_str(" ");
-            }
-        }
+        queue!(
+            stdout,
+            cursor::MoveTo(0, (i + 1) as u16),
+            style::Print(format!(" {}", &lyrics[index]))
+        )?;
     }
 
-    result.trim().to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+    stdout.flush()?;
+
+    Ok(())
 }
